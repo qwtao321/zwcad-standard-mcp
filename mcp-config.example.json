@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "zwcad-standard": {
+      "command": "D:\\path\\to\\zwcad-standard-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "zwcad_standard_mcp.server"],
+      "env": {
+        "ZWCAD_MCP_PROG_ID": "ZWCAD.Application",
+        "ZWCAD_MCP_TRANSPORT": "stdio"
+      }
+    }
+  }
+}

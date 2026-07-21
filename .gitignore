@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+*.log
+.env
+.DS_Store
+
+# Original v1 backup (pre-integration reference; not part of the published package)
+src/zwcad_standard_mcp_bak/
