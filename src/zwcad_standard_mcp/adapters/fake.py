@@ -24,6 +24,7 @@ class FakeCadAdapter(CadAdapter):
             "readonly": False,
             "active_layout": "Model",
         }
+        self._documents = [self.document]
         self.layers = {
             "0": {"name": "0", "color": 7, "linetype": "Continuous", "on": True, "locked": False, "frozen": False},
             "OUTLINE": {"name": "OUTLINE", "color": 7, "linetype": "Continuous", "on": True, "locked": False, "frozen": False},
@@ -80,12 +81,49 @@ class FakeCadAdapter(CadAdapter):
         return copy.deepcopy(self.document)
 
     def list_documents(self) -> list[dict]:
-        return [copy.deepcopy(self.document)]
+        return [copy.deepcopy(doc) for doc in self._documents]
+
+    def scan_cad_folder(self, path: str, recursive: bool = False) -> dict:
+        root = Path(path)
+        files = [
+            {"name": "A001.dwg", "path": str(root / "A001.dwg")},
+            {"name": "A002.dwg", "path": str(root / "A002.dwg")},
+        ]
+        return {
+            "folder": str(root),
+            "recursive": recursive,
+            "count": len(files),
+            "files": files,
+        }
+
+    def open_document(self, path: str, read_only: bool = False) -> dict:
+        target = Path(path)
+        new_doc = {
+            "name": target.name,
+            "full_name": str(target),
+            "path": str(target.parent),
+            "saved": True,
+            "readonly": read_only,
+            "active_layout": "Model",
+        }
+        self._documents.append(new_doc)
+        return copy.deepcopy(new_doc)
+
+    def close_document(self, name: str, save_changes: bool = False) -> dict:
+        for index, doc in enumerate(self._documents):
+            if doc["name"] == name:
+                self._documents.pop(index)
+                if self._documents:
+                    self.document = self._documents[-1]
+                return {"closed": True, "name": name, "save_changes": save_changes}
+        raise ValidationError(f"Document not found: {name}")
 
     def activate_document(self, name: str) -> dict:
-        if name != self.document["name"]:
-            raise ValidationError(f"Document not found: {name}")
-        return self.get_current_document()
+        for doc in self._documents:
+            if doc["name"] == name:
+                self.document = doc
+                return self.get_current_document()
+        raise ValidationError(f"Document not found: {name}")
 
     def save_document(self, file_path: str | None = None) -> dict:
         if file_path:

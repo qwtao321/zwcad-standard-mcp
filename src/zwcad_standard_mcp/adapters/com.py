@@ -358,6 +358,56 @@ class ComCadAdapter(CadAdapter):
             )
         return results
 
+    def scan_cad_folder(self, path: str, recursive: bool = False) -> dict:
+        root = Path(path).expanduser().resolve()
+        if not root.exists():
+            raise ValidationError(f"Path does not exist: {path}")
+        if not root.is_dir():
+            raise ValidationError(f"Path is not a directory: {path}")
+
+        cad_extensions = {".dwg", ".dxf", ".dwt"}
+        files = []
+        iterator = root.rglob("*") if recursive else root.iterdir()
+        for item in iterator:
+            if item.is_file() and item.suffix.lower() in cad_extensions:
+                files.append({"name": item.name, "path": str(item)})
+        files.sort(key=lambda f: f["path"])
+        return {
+            "folder": str(root),
+            "recursive": recursive,
+            "count": len(files),
+            "files": files,
+        }
+
+    def open_document(self, path: str, read_only: bool = False) -> dict:
+        app = self._connect()
+        target = Path(path).expanduser().resolve()
+        if not target.exists():
+            raise ValidationError(f"File does not exist: {path}")
+        try:
+            doc = app.Documents.Open(str(target), read_only)
+        except Exception as exc:
+            raise ValidationError(f"Cannot open document: {path}") from exc
+        return {
+            "name": str(self._safe_get(doc, "Name", "")),
+            "full_name": str(self._safe_get(doc, "FullName", "")),
+            "path": str(self._safe_get(doc, "Path", "")),
+            "saved": bool(self._safe_get(doc, "Saved", False)),
+            "readonly": bool(self._safe_get(doc, "ReadOnly", False)),
+        }
+
+    def close_document(self, name: str, save_changes: bool = False) -> dict:
+        app = self._connect()
+        try:
+            doc = app.Documents.Item(name)
+        except Exception as exc:
+            raise ValidationError(f"Document not found: {name}") from exc
+        try:
+            doc.Close(save_changes)
+        except Exception as exc:
+            raise ValidationError(f"Cannot close document: {name}") from exc
+        return {"closed": True, "name": name, "save_changes": save_changes}
+
     def activate_document(self, name: str) -> dict:
         app = self._connect()
         try:

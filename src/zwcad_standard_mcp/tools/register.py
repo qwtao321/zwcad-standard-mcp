@@ -8,6 +8,7 @@ from .block_tools import register_block_tools
 from .document_tools import register_document_tools
 from .drawing_tools import register_drawing_tools
 from .entity_tools import register_entity_tools
+from .file_management_tools import register_file_management_tools
 from .layer_tools import register_layer_tools
 from .layout_tools import register_layout_tools
 from .system_tools import register_system_tools
@@ -16,6 +17,7 @@ from .system_tools import register_system_tools
 def register_all_tools(mcp: Any, service: CadService) -> None:
     register_system_tools(mcp, service)
     register_document_tools(mcp, service)
+    register_file_management_tools(mcp, service)
     register_layer_tools(mcp, service)
     register_entity_tools(mcp, service)
     register_drawing_tools(mcp, service)
