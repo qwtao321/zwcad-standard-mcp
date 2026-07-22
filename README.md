@@ -15,11 +15,11 @@
 | 外部导入图纸全部在 0 层，颜色和线型不随层 | `normalize_selected_entities`、`ensure_layers`、`update_entity_properties` |
 | 需要批量读取、修改或变换一组对象 | `get_selected_entities`、`get_entity_details`、`transform_entities` |
 | 重复绘制简单几何、文字和常用标注 | `create_entities_batch` |
-| 多个布局逐个切换和出 PDF | `list_layouts`、`plot_layouts` |
+| 多个布局逐个切换和出 PDF，或整个文件夹批量出图 | `list_layouts`、`plot_layouts`、`create_batch_job`、`scan_cad_folder` |
 | 标准版标题栏是属性块，需要批量检查和填写 | `list_block_references`、`get_block_attributes`、`update_block_attributes` |
-| 操作风险高，担心误改或误删 | 写工具默认 `dry_run=true`、全局写入开关、删除/保存二次确认、Undo Mark |
+| 操作风险高，担心误改或误删 | 写工具默认 `dry_run=true`、每次调用授权（`confirm`）、删除/保存二次确认、Undo Mark |
 
-## 工具清单（26 个）
+## 工具清单（33 个）
 
 ### 系统诊断
 
@@ -59,8 +59,10 @@
 
 - `list_layouts`
 - `activate_layout`
+- `get_layout_plot_settings`
 - `plot_layouts`
 - `export_drawing`
+- `verify_export_files`
 
 ### 图块
 
@@ -69,6 +71,16 @@
 - `get_block_attributes`
 - `update_block_attributes`
 - `insert_blocks_batch`
+
+### 文件管理
+
+- `scan_cad_folder`
+- `open_document`
+- `close_document`
+- `create_batch_job`
+- `get_batch_job_status`
+
+> 文件夹级批量出图：先用 `scan_cad_folder` 列出目标目录的全部 CAD 文件，再 `create_batch_job(operation="plot_pdf", files=[...], output_dir=..., config={"plot_configuration": "DWG to PDF.pc5", "extension": "pdf"})` 在后台线程逐个只读打开、出 PDF、关闭；`get_batch_job_status` 轮询进度。批量任务在独立 COM 适配器实例中运行，不与交互会话争用主线程。
 
 ## 安全默认值
 
@@ -171,6 +183,13 @@ python -m zwcad_standard_mcp.server
 4. 用户确认后用 `dry_run=false` 执行。
 5. 再次读取属性验证。
 
+### 第 4 阶段：文件夹级批量出图
+
+1. `scan_cad_folder(path="目标目录")` 列出全部 DWG/DXF/DWT。
+2. `create_batch_job(operation="plot_pdf", files=[...], output_dir=".../Publish", config={"plot_configuration": "DWG to PDF.pc5", "extension": "pdf"}, confirm=true)` 创建并执行批量任务。
+3. `get_batch_job_status(job_id=...)` 轮询进度。
+4. `verify_export_files(file_paths=[...])` 校验产物。
+
 ## 示例
 
 ### 归一化当前选中对象
@@ -258,6 +277,7 @@ python -m zwcad_standard_mcp.server
 - 不包含机械版专用对象。
 - 动态块、嵌套块、外部参照内属性、字段对象、复杂代理对象可能需要后续专项适配。
 - `plot_layouts` 依赖当前布局已有可用打印配置；不同企业 PC3、PMP 和纸张配置需实机验证。
+- 文件夹级批量任务（`create_batch_job` 传入 `files`）在后台线程中打开图纸并出图；若 ZWCAD 因缺少字体、代理对象或打印配置弹出模态对话框，会阻塞该后台线程，需先在 ZWCAD 中关闭所有弹窗再重试。
 - 当前查询以 COM 集合遍历为主，大图纸需要进一步增加索引、选择集过滤和分页。
 - Undo Mark 便于用户撤销，但不是数据库级自动事务回滚。
 
