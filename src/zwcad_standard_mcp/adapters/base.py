@@ -61,6 +61,9 @@ class CadAdapter(ABC):
     def list_layouts(self) -> list[dict]: ...
 
     @abstractmethod
+    def get_layout_plot_settings(self, layout_name: str | None) -> dict: ...
+
+    @abstractmethod
     def activate_layout(self, name: str) -> dict: ...
 
     @abstractmethod
@@ -74,6 +77,9 @@ class CadAdapter(ABC):
 
     @abstractmethod
     def export_drawing(self, base_file_path: str, extension: str) -> dict: ...
+
+    @abstractmethod
+    def verify_export_files(self, file_paths: list[str]) -> dict: ...
 
     @abstractmethod
     def list_block_definitions(self, detail: bool) -> list[dict]: ...

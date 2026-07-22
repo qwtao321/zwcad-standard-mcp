@@ -733,6 +733,51 @@ class ComCadAdapter(CadAdapter):
             )
         return sorted(results, key=lambda item: item["tab_order"])
 
+    def get_layout_plot_settings(self, layout_name: str | None) -> dict:
+        doc = self._doc()
+        try:
+            if layout_name:
+                layout = doc.Layouts.Item(layout_name)
+            else:
+                layout = self._safe_get(doc, "ActiveLayout")
+            if layout is None:
+                raise ValidationError("No active layout or layout not found.")
+        except Exception as exc:
+            raise ValidationError(f"Layout not found: {layout_name}") from exc
+
+        plot_type_raw = self._safe_get(layout, "PlotType")
+        plot_type_map = {
+            0: "display",
+            1: "extents",
+            2: "limits",
+            3: "view",
+            4: "window",
+            5: "layout",
+        }
+        paper_units_raw = self._safe_get(layout, "PaperUnits")
+        paper_units_map = {0: "inches", 1: "millimeters", 2: "pixels"}
+        rotation_raw = self._safe_get(layout, "PlotRotation")
+        rotation_map = {0: "0_degrees", 1: "90_degrees", 2: "180_degrees", 3: "270_degrees"}
+
+        return {
+            "name": str(self._safe_get(layout, "Name", "")),
+            "config_name": str(self._safe_get(layout, "ConfigName", "")),
+            "canonical_media_name": str(self._safe_get(layout, "CanonicalMediaName", "")),
+            "plot_type": plot_type_map.get(plot_type_raw, plot_type_raw),
+            "paper_units": paper_units_map.get(paper_units_raw, paper_units_raw),
+            "plot_scale": self._json_value(self._safe_get(layout, "PlotScale")),
+            "std_scale_name": str(self._safe_get(layout, "StdScaleName", "")),
+            "std_scale": self._json_value(self._safe_get(layout, "StdScale")),
+            "plot_rotation": rotation_map.get(rotation_raw, rotation_raw),
+            "plot_origin": self._json_value(self._safe_get(layout, "PlotOrigin")),
+            "center_plot": bool(self._safe_get(layout, "CenterPlot", False)),
+            "plot_hidden": bool(self._safe_get(layout, "PlotHidden", False)),
+            "plot_with_lineweights": bool(self._safe_get(layout, "PlotWithLineweights", False)),
+            "plot_with_plot_styles": bool(self._safe_get(layout, "PlotWithPlotStyles", False)),
+            "scale_lineweights": bool(self._safe_get(layout, "ScaleLineweights", False)),
+            "use_standard_scale": bool(self._safe_get(layout, "UseStandardScale", False)),
+        }
+
     def activate_layout(self, name: str) -> dict:
         doc = self._doc()
         try:
@@ -790,6 +835,61 @@ class ComCadAdapter(CadAdapter):
                     selection.Delete()
                 except Exception:
                     pass
+
+    def verify_export_files(self, file_paths: list[str]) -> dict:
+        def _detect_signature(path: Path) -> dict:
+            signatures = {
+                ".pdf": (b"%PDF", "PDF"),
+                ".dxf": (None, "DXF"),  # textual, checked separately
+                ".dwg": (b"AC", "DWG"),
+                ".step": (b"ISO-10303-21", "STEP"),
+                ".stp": (b"ISO-10303-21", "STEP"),
+                ".stl": (b"solid ", "STL (ASCII)"),
+                ".3mf": (b"PK", "3MF (ZIP)"),
+                ".png": (b"\x89PNG", "PNG"),
+                ".jpg": (b"\xff\xd8", "JPEG"),
+                ".jpeg": (b"\xff\xd8", "JPEG"),
+            }
+            ext = path.suffix.lower()
+            marker, label = signatures.get(ext, (None, ext.upper().lstrip(".") or "unknown"))
+            try:
+                with open(path, "rb") as fh:
+                    head = fh.read(16)
+            except Exception as exc:
+                return {"signature_ok": False, "detected_format": None, "error": str(exc)}
+            if ext == ".dxf":
+                is_ascii = head.startswith(b"  0\n") or head.startswith(b"0\n") or b"SECTION" in head[:64]
+                return {"signature_ok": is_ascii, "detected_format": "DXF" if is_ascii else "unknown"}
+            if marker is None:
+                return {"signature_ok": True, "detected_format": label, "note": "no signature check for this extension"}
+            ok = head.startswith(marker)
+            return {"signature_ok": ok, "detected_format": label if ok else "unknown"}
+
+        results = []
+        for raw_path in file_paths:
+            path = Path(raw_path).expanduser().resolve()
+            item = {
+                "path": str(path),
+                "exists": path.exists(),
+                "size_bytes": path.stat().st_size if path.exists() else 0,
+                "extension": path.suffix.lower(),
+            }
+            if item["exists"]:
+                item.update(_detect_signature(path))
+            else:
+                item.update({"signature_ok": False, "detected_format": None, "error": "file not found"})
+            results.append(item)
+
+        existing = [r for r in results if r["exists"]]
+        verified = [r for r in results if r.get("signature_ok")]
+        return {
+            "total": len(results),
+            "existing": len(existing),
+            "verified": len(verified),
+            "missing": [r["path"] for r in results if not r["exists"]],
+            "failed": [r["path"] for r in results if r["exists"] and not r.get("signature_ok")],
+            "results": results,
+        }
 
     def list_block_definitions(self, detail: bool) -> list[dict]:
         doc = self._doc()

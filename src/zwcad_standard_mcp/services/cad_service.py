@@ -278,6 +278,9 @@ class CadService:
         layouts = self.adapter.list_layouts()
         return {"success": True, "count": len(layouts), "data": layouts}
 
+    def get_layout_plot_settings(self, layout_name: str | None = None) -> dict:
+        return {"success": True, "data": self.adapter.get_layout_plot_settings(layout_name)}
+
     def activate_layout(self, name: str) -> dict:
         return {"success": True, "data": self.adapter.activate_layout(name)}
 
@@ -328,6 +331,11 @@ class CadService:
             return rejection
         self._ensure_write()
         return {"success": True, "dry_run": False, "data": self.adapter.export_drawing(base_file_path, extension)}
+
+    def verify_export_files(self, file_paths: list[str]) -> dict:
+        if not file_paths:
+            raise ValidationError("file_paths cannot be empty.")
+        return {"success": True, "data": self.adapter.verify_export_files(file_paths)}
 
     def list_block_definitions(self, detail: bool = False) -> dict:
         blocks = self.adapter.list_block_definitions(detail)
