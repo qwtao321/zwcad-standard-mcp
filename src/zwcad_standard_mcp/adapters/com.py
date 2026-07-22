@@ -16,7 +16,12 @@ from zwcad_standard_mcp.errors import (
     UnsupportedOperationError,
     ValidationError,
 )
-from zwcad_standard_mcp.models import EntityCreateSpec, EntityQuerySpec, LayerSpec
+from zwcad_standard_mcp.models import (
+    EntityCreateSpec,
+    EntityQuerySpec,
+    LayerSpec,
+    PlotScopeRequest,
+)
 
 from .base import CadAdapter
 
@@ -285,6 +290,87 @@ class ComCadAdapter(CadAdapter):
             )
         return results
 
+    def _bounds_from_corners(self, min_point: Any, max_point: Any) -> dict:
+        return {
+            "min": self._json_value(min_point),
+            "max": self._json_value(max_point),
+        }
+
+    def _try_get_bounding_box(self, entity: Any) -> dict | None:
+        try:
+            min_point, max_point = entity.GetBoundingBox()
+            return self._bounds_from_corners(min_point, max_point)
+        except Exception:
+            return None
+
+    def _merge_bounds(self, bounds: list[dict]) -> dict:
+        if not bounds:
+            return {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}
+        min_vals = [float("inf"), float("inf"), float("inf")]
+        max_vals = [float("-inf"), float("-inf"), float("-inf")]
+        for box in bounds:
+            mn = box.get("min", [0, 0, 0])
+            mx = box.get("max", [0, 0, 0])
+            for i in range(3):
+                min_vals[i] = min(min_vals[i], float(mn[i]) if i < len(mn) else 0.0)
+                max_vals[i] = max(max_vals[i], float(mx[i]) if i < len(mx) else 0.0)
+        return {"min": min_vals, "max": max_vals}
+
+    def _get_space(self, entity: Any) -> str:
+        owner = self._safe_get(entity, "OwnerID")
+        if owner is None:
+            return "unknown"
+        try:
+            doc = self._doc()
+            owner_obj = doc.ObjectIdToObject(owner)
+            owner_name = str(self._safe_get(owner_obj, "ObjectName", "")).lower()
+            if "paperspace" in owner_name:
+                return "paper"
+            if "modelspace" in owner_name:
+                return "model"
+        except Exception:
+            pass
+        return "unknown"
+
+    def _scan_pc5_files(self) -> list[str]:
+        candidates = []
+        for base in (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
+            Path.home() / "AppData" / "Roaming",
+            Path.home() / "AppData" / "Local",
+        ):
+            if not base.exists():
+                continue
+            for root in base.rglob("*.pc5"):
+                try:
+                    candidates.append(str(root))
+                except Exception:
+                    pass
+        return candidates[:50]
+
+    def _list_plot_devices(self, app: Any) -> list[str]:
+        try:
+            return [str(d) for d in app.GetPlotDevices()]
+        except Exception:
+            pass
+        try:
+            return [str(d) for d in app.GetPlotDeviceNames()]
+        except Exception:
+            pass
+        return []
+
+    def _list_media_names(self, plot: Any, config_name: str) -> list[str]:
+        try:
+            return [str(m) for m in plot.GetCanonicalMediaNames(config_name)]
+        except Exception:
+            pass
+        try:
+            return [str(m) for m in plot.GetCanonicalMediaNameList(config_name)]
+        except Exception:
+            pass
+        return []
+
     @contextlib.contextmanager
     def _undo_group(self) -> Iterator[None]:
         self.begin_undo()
@@ -529,7 +615,12 @@ class ComCadAdapter(CadAdapter):
         for index, entity in enumerate(self._iter_collection(selection)):
             if index >= limit:
                 break
-            results.append(self._entity_summary(entity))
+            item = self._entity_summary(entity)
+            item["space"] = self._get_space(entity)
+            bounds = self._try_get_bounding_box(entity)
+            if bounds is not None:
+                item["bounding_box"] = bounds
+            results.append(item)
         return results
 
     def query_entities(self, query: EntityQuerySpec) -> list[dict]:
@@ -809,10 +900,11 @@ class ComCadAdapter(CadAdapter):
         rotation_raw = self._safe_get(layout, "PlotRotation")
         rotation_map = {0: "0_degrees", 1: "90_degrees", 2: "180_degrees", 3: "270_degrees"}
 
-        return {
+        settings = {
             "name": str(self._safe_get(layout, "Name", "")),
             "config_name": str(self._safe_get(layout, "ConfigName", "")),
             "canonical_media_name": str(self._safe_get(layout, "CanonicalMediaName", "")),
+            "plot_device": str(self._safe_get(layout, "ConfigName", "")),
             "plot_type": plot_type_map.get(plot_type_raw, plot_type_raw),
             "paper_units": paper_units_map.get(paper_units_raw, paper_units_raw),
             "plot_scale": self._json_value(self._safe_get(layout, "PlotScale")),
@@ -826,9 +918,222 @@ class ComCadAdapter(CadAdapter):
             "plot_with_plot_styles": bool(self._safe_get(layout, "PlotWithPlotStyles", False)),
             "scale_lineweights": bool(self._safe_get(layout, "ScaleLineweights", False)),
             "use_standard_scale": bool(self._safe_get(layout, "UseStandardScale", False)),
+            "plot_style_sheet": str(self._safe_get(layout, "PlotStyleSheet", "")),
+            "style_sheet": str(self._safe_get(layout, "StyleSheet", "")),
+        }
+        try:
+            lower_left = self._safe_get(layout, "PlotWindowLowerLeft")
+            upper_right = self._safe_get(layout, "PlotWindowUpperRight")
+            if lower_left is not None and upper_right is not None:
+                settings["window_lower_left"] = self._json_value(lower_left)
+                settings["window_upper_right"] = self._json_value(upper_right)
+        except Exception:
+            pass
+        try:
+            view_name = self._safe_get(layout, "ViewToPlot")
+            if view_name is not None:
+                settings["view_to_plot"] = str(view_name)
+        except Exception:
+            pass
+        return settings
+
+    def get_plot_capabilities(self) -> dict:
+        doc = self._doc()
+        app = self._connect()
+        plot = self._safe_get(doc, "Plot")
+
+        devices = self._list_plot_devices(app)
+        if not devices:
+            devices = self._scan_pc5_files()
+
+        default_config = "DWG to PDF.pc5"
+        media_names = []
+        if plot is not None:
+            media_names = self._list_media_names(plot, default_config)
+        if not media_names:
+            media_names = [
+                "A0",
+                "A1",
+                "A2",
+                "A3",
+                "A4",
+                "A0+",
+                "ANSI_A",
+                "ANSI_B",
+                "ANSI_C",
+                "ANSI_D",
+                "ANSI_E",
+                "ISO_A0",
+                "ISO_A1",
+                "ISO_A2",
+                "ISO_A3",
+                "ISO_A4",
+            ]
+
+        return {
+            "devices": devices,
+            "default_device": default_config,
+            "paper_sizes": media_names,
+            "supported_extensions": ["pdf", "dwf", "dwfx", "dxf", "png", "jpg", "jpeg"],
+            "note": "Device list falls back to known PC5 files if COM does not expose GetPlotDevices.",
         }
 
-    def activate_layout(self, name: str) -> dict:
+    def _resolve_layout(self, doc: Any, layout_name: str | None) -> Any:
+        if layout_name:
+            try:
+                return doc.Layouts.Item(layout_name)
+            except Exception as exc:
+                raise ValidationError(f"Layout not found: {layout_name}") from exc
+        return self._safe_get(doc, "ActiveLayout")
+
+    def _bounds_for_scope(self, scope_type: str, layout: Any, request: PlotScopeRequest) -> dict:
+        doc = self._doc()
+        if scope_type in {"display", "view"}:
+            return self._bounds_from_current_view(doc)
+        if scope_type == "extents":
+            return self.get_drawing_extents()
+        if scope_type == "limits":
+            try:
+                return self._bounds_from_corners(doc.GetVariable("LIMMIN"), doc.GetVariable("LIMMAX"))
+            except Exception:
+                return self._merge_bounds([])
+        if scope_type == "window":
+            lower_left = request.window_lower_left or self._json_value(self._safe_get(layout, "PlotWindowLowerLeft"))
+            upper_right = request.window_upper_right or self._json_value(self._safe_get(layout, "PlotWindowUpperRight"))
+            if lower_left and upper_right:
+                return {"min": lower_left, "max": upper_right}
+            return self._merge_bounds([])
+        if scope_type == "layout":
+            try:
+                min_point = self._safe_get(layout, "PaperMin")
+                max_point = self._safe_get(layout, "PaperMax")
+                if min_point and max_point:
+                    return self._bounds_from_corners(min_point, max_point)
+            except Exception:
+                pass
+            return self._merge_bounds([])
+        return self._merge_bounds([])
+
+    def _bounds_from_current_view(self, doc: Any) -> dict:
+        try:
+            viewport = self._safe_get(doc, "ActivePViewport")
+            if viewport is not None:
+                center = self._safe_get(viewport, "Center")
+                height = float(self._safe_get(viewport, "Height", 1.0))
+                width = float(self._safe_get(viewport, "Width", height))
+                if center is not None:
+                    cx, cy = float(center[0]), float(center[1])
+                    return {"min": [cx - width / 2, cy - height / 2, 0.0], "max": [cx + width / 2, cy + height / 2, 0.0]}
+        except Exception:
+            pass
+        try:
+            viewport = self._safe_get(doc.Application, "ActiveViewport")
+            center = self._safe_get(viewport, "Center")
+            height = float(self._safe_get(viewport, "Height", 1.0))
+            width = float(self._safe_get(viewport, "Width", height))
+            if center is not None:
+                cx, cy = float(center[0]), float(center[1])
+                return {"min": [cx - width / 2, cy - height / 2, 0.0], "max": [cx + width / 2, cy + height / 2, 0.0]}
+        except Exception:
+            pass
+        return {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]}
+
+    def preview_plot_scope(self, request: PlotScopeRequest) -> dict:
+        doc = self._doc()
+        layout = self._resolve_layout(doc, request.layout_name)
+        if layout is None:
+            raise ValidationError("No active layout or layout not found.")
+
+        layout_settings = self.get_layout_plot_settings(request.layout_name)
+        scope_type = request.scope_type or layout_settings.get("plot_type", "layout")
+        if isinstance(scope_type, int):
+            type_map = {0: "display", 1: "extents", 2: "limits", 3: "view", 4: "window", 5: "layout"}
+            scope_type = type_map.get(scope_type, "layout")
+
+        bounds = self._bounds_for_scope(scope_type, layout, request)
+        drawing_extents = self.get_drawing_extents()
+        try:
+            mn = bounds.get("min", [0, 0, 0])
+            mx = bounds.get("max", [0, 0, 0])
+            area = max(0.0, (mx[0] - mn[0]) * (mx[1] - mn[1])) if len(mn) >= 2 and len(mx) >= 2 else 0.0
+            dx_mn = drawing_extents.get("min", [0, 0, 0])
+            dx_mx = drawing_extents.get("max", [0, 0, 0])
+            drawing_area = max(0.0, (dx_mx[0] - dx_mn[0]) * (dx_mx[1] - dx_mn[1])) if len(dx_mn) >= 2 and len(dx_mx) >= 2 else 0.0
+            clipping_risk = (
+                area > 0
+                and drawing_area > 0
+                and (area < drawing_area * 0.9)
+                and scope_type in {"display", "window", "limits", "view"}
+            )
+        except Exception:
+            clipping_risk = False
+
+        return {
+            "layout": layout_settings.get("name"),
+            "scope_type": scope_type,
+            "bounds": bounds,
+            "drawing_extents": drawing_extents,
+            "clipping_risk": clipping_risk,
+            "layout_settings": layout_settings,
+        }
+
+    def get_current_view(self) -> dict:
+        doc = self._doc()
+        bounds = self._bounds_from_current_view(doc)
+        try:
+            viewport = self._safe_get(doc, "ActivePViewport")
+            if viewport is not None:
+                return {
+                    "type": "paper_viewport",
+                    "center": self._json_value(self._safe_get(viewport, "Center")),
+                    "height": float(self._safe_get(viewport, "Height", 1.0)),
+                    "width": float(self._safe_get(viewport, "Width", 1.0)),
+                    "bounds": bounds,
+                    "twist_angle": float(self._safe_get(viewport, "TwistAngle", 0.0)),
+                }
+        except Exception:
+            pass
+        try:
+            viewport = self._safe_get(doc.Application, "ActiveViewport")
+            if viewport is not None:
+                return {
+                    "type": "viewport",
+                    "center": self._json_value(self._safe_get(viewport, "Center")),
+                    "height": float(self._safe_get(viewport, "Height", 1.0)),
+                    "width": float(self._safe_get(viewport, "Width", 1.0)),
+                    "bounds": bounds,
+                    "twist_angle": float(self._safe_get(viewport, "TwistAngle", 0.0)),
+                }
+        except Exception:
+            pass
+        return {"type": "unknown", "bounds": bounds}
+
+    def get_drawing_extents(self) -> dict:
+        doc = self._doc()
+        try:
+            extents = self._safe_get(doc, "Extents")
+            if extents is not None:
+                return self._bounds_from_corners(extents.minPoint, extents.maxPoint)
+        except Exception:
+            pass
+        try:
+            min_point = self._safe_get(doc, "MinPoint")
+            max_point = self._safe_get(doc, "MaxPoint")
+            if min_point and max_point:
+                return self._bounds_from_corners(min_point, max_point)
+        except Exception:
+            pass
+
+        bounds: list[dict] = []
+        for layout_name, space in self._spaces("all_layouts"):
+            for entity in self._iter_collection(space):
+                box = self._try_get_bounding_box(entity)
+                if box is not None:
+                    bounds.append(box)
+        if bounds:
+            return self._merge_bounds(bounds)
+        return {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}
+
         doc = self._doc()
         try:
             layout = doc.Layouts.Item(name)
@@ -845,6 +1150,14 @@ class ComCadAdapter(CadAdapter):
         output_dir: str,
         plot_configuration: str | None,
         extension: str,
+        scope_type: str | None = None,
+        window_lower_left: list[float] | None = None,
+        window_upper_right: list[float] | None = None,
+        selected_handles: list[str] | None = None,
+        center_plot: bool | None = None,
+        fit_to_paper: bool | None = None,
+        custom_scale: float | None = None,
+        override_policy: str = "temporary",
     ) -> list[dict]:
         doc = self._doc()
         output = Path(output_dir).expanduser().resolve()
@@ -854,13 +1167,37 @@ class ComCadAdapter(CadAdapter):
         for name in layout_names:
             try:
                 self.activate_layout(name)
+                layout = self._safe_get(doc, "ActiveLayout")
+                original_settings: dict[str, Any] = {}
+                try:
+                    original_settings = self.get_layout_plot_settings(name)
+                except Exception:
+                    pass
+                self._apply_plot_scope_to_layout(
+                    layout,
+                    scope_type=scope_type,
+                    window_lower_left=window_lower_left,
+                    window_upper_right=window_upper_right,
+                    selected_handles=selected_handles,
+                    center_plot=center_plot,
+                    fit_to_paper=fit_to_paper,
+                    custom_scale=custom_scale,
+                )
                 safe_name = "".join(c if c not in '<>:"/\\|?*' else "_" for c in name)
                 file_path = output / f"{Path(str(self._safe_get(doc, 'Name', 'drawing'))).stem}-{safe_name}.{extension.lstrip('.')}"
                 config = plot_configuration or str(
                     self._safe_get(self._safe_get(doc, "ActiveLayout"), "ConfigName", "")
                 )
                 doc.Plot.PlotToFile(str(file_path), config)
-                results.append({"success": True, "layout": name, "file_path": str(file_path), "plot_configuration": config})
+                results.append({
+                    "success": True,
+                    "layout": name,
+                    "file_path": str(file_path),
+                    "plot_configuration": config,
+                    "scope_applied": scope_type is not None,
+                })
+                if override_policy == "temporary":
+                    self._restore_plot_settings(layout, original_settings)
             except Exception as exc:
                 results.append({"success": False, "layout": name, "error": str(exc)})
         if original:
@@ -869,6 +1206,98 @@ class ComCadAdapter(CadAdapter):
             except Exception:
                 pass
         return results
+
+    def _apply_plot_scope_to_layout(
+        self,
+        layout: Any,
+        scope_type: str | None,
+        window_lower_left: list[float] | None,
+        window_upper_right: list[float] | None,
+        selected_handles: list[str] | None,
+        center_plot: bool | None,
+        fit_to_paper: bool | None,
+        custom_scale: float | None,
+    ) -> None:
+        if layout is None:
+            return
+        plot_type_map = {
+            "display": 0,
+            "extents": 1,
+            "limits": 2,
+            "view": 3,
+            "window": 4,
+            "layout": 5,
+        }
+        if scope_type is not None and scope_type in plot_type_map:
+            try:
+                layout.PlotType = plot_type_map[scope_type]
+            except Exception:
+                pass
+        if window_lower_left and window_upper_right:
+            try:
+                layout.PlotWindowLowerLeft = self._point(window_lower_left)
+                layout.PlotWindowUpperRight = self._point(window_upper_right)
+            except Exception:
+                pass
+        if selected_handles and scope_type in {None, "window"}:
+            try:
+                layout.PlotType = plot_type_map["window"]
+                handles = selected_handles
+                # ZWCAD does not expose a direct SetPlotWindowFromHandles API; leave the window as-is
+                # and record the handles for the caller.
+                layout.SetWindowToPlot = handles  # best-effort attempt
+            except Exception:
+                pass
+        if center_plot is not None:
+            try:
+                layout.CenterPlot = bool(center_plot)
+            except Exception:
+                pass
+        if fit_to_paper is not None:
+            try:
+                layout.UseStandardScale = True
+                layout.StdScale = -1  # Fit to paper in many AutoCAD-compatible APIs
+                layout.PlotScale = [0, 1]  # 0:1 is often "fit to paper"
+            except Exception:
+                pass
+        if custom_scale is not None and custom_scale > 0:
+            try:
+                layout.UseStandardScale = False
+                layout.PlotScale = [1, custom_scale]
+            except Exception:
+                pass
+
+    def _restore_plot_settings(self, layout: Any, original: dict[str, Any]) -> None:
+        if not layout or not original:
+            return
+        plot_type_map = {
+            "display": 0,
+            "extents": 1,
+            "limits": 2,
+            "view": 3,
+            "window": 4,
+            "layout": 5,
+        }
+        try:
+            plot_type = original.get("plot_type")
+            if isinstance(plot_type, str) and plot_type in plot_type_map:
+                layout.PlotType = plot_type_map[plot_type]
+            elif isinstance(plot_type, int):
+                layout.PlotType = plot_type
+        except Exception:
+            pass
+        for key, prop in (
+            ("center_plot", "CenterPlot"),
+            ("use_standard_scale", "UseStandardScale"),
+            ("plot_scale", "PlotScale"),
+            ("std_scale", "StdScale"),
+        ):
+            value = original.get(key)
+            if value is not None:
+                try:
+                    setattr(layout, prop, value)
+                except Exception:
+                    pass
 
     def export_drawing(self, base_file_path: str, extension: str) -> dict:
         doc = self._doc()
@@ -886,7 +1315,13 @@ class ComCadAdapter(CadAdapter):
                 except Exception:
                     pass
 
-    def verify_export_files(self, file_paths: list[str]) -> dict:
+    def verify_export_files(
+        self,
+        file_paths: list[str],
+        layout_names: list[str] | None = None,
+        min_size_bytes: int = 1024,
+        expected_plot_range: dict[str, list[float]] | None = None,
+    ) -> dict:
         def _detect_signature(path: Path) -> dict:
             signatures = {
                 ".pdf": (b"%PDF", "PDF"),
@@ -923,21 +1358,40 @@ class ComCadAdapter(CadAdapter):
                 "exists": path.exists(),
                 "size_bytes": path.stat().st_size if path.exists() else 0,
                 "extension": path.suffix.lower(),
+                "layout_check": None,
+                "size_check": None,
+                "range_check": None,
             }
             if item["exists"]:
                 item.update(_detect_signature(path))
+                item["size_check"] = item["size_bytes"] >= min_size_bytes
+                if layout_names is not None:
+                    stem = path.stem
+                    item["layout_check"] = any(layout in stem for layout in layout_names)
+                if expected_plot_range is not None:
+                    expected_min = expected_plot_range.get("min", [0, 0, 0])
+                    expected_max = expected_plot_range.get("max", [0, 0, 0])
+                    # Without reading the file content, we can only verify that a non-zero range was expected.
+                    area = 0.0
+                    if len(expected_min) >= 2 and len(expected_max) >= 2:
+                        area = max(0.0, (expected_max[0] - expected_min[0]) * (expected_max[1] - expected_min[1]))
+                    item["range_check"] = area > 0.0
             else:
                 item.update({"signature_ok": False, "detected_format": None, "error": "file not found"})
+                item["size_check"] = False
+                if layout_names is not None:
+                    item["layout_check"] = False
+                item["range_check"] = False
             results.append(item)
 
         existing = [r for r in results if r["exists"]]
-        verified = [r for r in results if r.get("signature_ok")]
+        verified = [r for r in results if r.get("signature_ok") and r.get("size_check") and r.get("layout_check") is not False and r.get("range_check") is not False]
         return {
             "total": len(results),
             "existing": len(existing),
             "verified": len(verified),
             "missing": [r["path"] for r in results if not r["exists"]],
-            "failed": [r["path"] for r in results if r["exists"] and not r.get("signature_ok")],
+            "failed": [r["path"] for r in results if r["exists"] and r not in verified],
             "results": results,
         }
 

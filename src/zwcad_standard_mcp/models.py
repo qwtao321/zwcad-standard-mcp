@@ -64,6 +64,40 @@ class BlockAttributePatch(BaseModel):
     attributes: dict[str, str] = Field(min_length=1)
 
 
+class PlotScopeRequest(BaseModel):
+    """Request to preview the final plot area for a given scope."""
+
+    scope_type: Literal["display", "extents", "limits", "view", "window", "layout"] | None = Field(
+        default=None,
+        description="Plot scope type to preview. If omitted, the active layout's current PlotType is used.",
+    )
+    layout_name: str | None = Field(
+        default=None,
+        description="Layout to inspect. Defaults to the active layout.",
+    )
+    window_lower_left: list[float] | None = Field(
+        default=None,
+        description="Lower-left corner of the plot window (only for scope_type='window').",
+    )
+    window_upper_right: list[float] | None = Field(
+        default=None,
+        description="Upper-right corner of the plot window (only for scope_type='window').",
+    )
+    selected_handles: list[str] | None = Field(
+        default=None,
+        description="Handles to use when previewing a 'selected' scope.",
+    )
+
+    @field_validator("window_lower_left", "window_upper_right")
+    @classmethod
+    def _window_corner_2d(cls, value: list[float] | None) -> list[float] | None:
+        if value is None:
+            return value
+        if len(value) < 2:
+            raise ValueError("Window corner must have at least [x, y].")
+        return [float(v) for v in value[:3]]
+
+
 class TransformRequest(BaseModel):
     action: Literal["move", "copy", "rotate", "scale", "mirror"]
     handles: list[str] = Field(min_length=1)
@@ -73,3 +107,4 @@ class TransformRequest(BaseModel):
     @classmethod
     def unique_handles(cls, value: list[str]) -> list[str]:
         return list(dict.fromkeys(handle.strip() for handle in value if handle.strip()))
+

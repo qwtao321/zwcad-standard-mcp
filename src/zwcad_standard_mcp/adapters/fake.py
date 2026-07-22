@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from zwcad_standard_mcp.errors import EntityNotFoundError, ValidationError
-from zwcad_standard_mcp.models import EntityCreateSpec, EntityQuerySpec, LayerSpec
+from zwcad_standard_mcp.models import (
+    EntityCreateSpec,
+    EntityQuerySpec,
+    LayerSpec,
+    PlotScopeRequest,
+)
+
 
 from .base import CadAdapter
 
@@ -179,7 +185,25 @@ class FakeCadAdapter(CadAdapter):
         }
 
     def get_selected_entities(self, limit: int) -> list[dict]:
-        return [copy.deepcopy(self._entity(handle)) for handle in self.selected_handles[:limit]]
+        results = []
+        for handle in self.selected_handles[:limit]:
+            entity = copy.deepcopy(self._entity(handle))
+            entity["space"] = entity.get("layout", "Model")
+            entity["bounding_box"] = self._fake_bounds(entity)
+            results.append(entity)
+        return results
+
+    def _fake_bounds(self, entity: dict) -> dict:
+        et = entity.get("entity_type", "")
+        if et == "line":
+            sp = entity.get("StartPoint", [0, 0, 0])
+            ep = entity.get("EndPoint", [0, 0, 0])
+            return {"min": [min(sp[0], ep[0]), min(sp[1], ep[1]), 0.0], "max": [max(sp[0], ep[0]), max(sp[1], ep[1]), 0.0]}
+        if et == "circle":
+            c = entity.get("Center", [0, 0, 0])
+            r = entity.get("Radius", 0)
+            return {"min": [c[0] - r, c[1] - r, 0.0], "max": [c[0] + r, c[1] + r, 0.0]}
+        return {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 0.0]}
 
     def query_entities(self, query: EntityQuerySpec) -> list[dict]:
         results = []
@@ -270,6 +294,76 @@ class FakeCadAdapter(CadAdapter):
     def list_layouts(self) -> list[dict]:
         return copy.deepcopy(self.layouts)
 
+    def get_layout_plot_settings(self, layout_name: str | None) -> dict:
+        name = layout_name or self.document.get("active_layout", "Model")
+        for layout in self.layouts:
+            if layout["name"] == name:
+                return {
+                    "name": layout["name"],
+                    "config_name": "DWG To PDF.pc3",
+                    "canonical_media_name": "A3",
+                    "plot_device": "DWG To PDF.pc3",
+                    "plot_type": "layout" if not layout.get("model_space") else "display",
+                    "paper_units": "millimeters",
+                    "plot_scale": [1, 1],
+                    "std_scale_name": "1:1",
+                    "std_scale": 1.0,
+                    "plot_rotation": "0_degrees",
+                    "plot_origin": [0, 0],
+                    "center_plot": True,
+                    "plot_hidden": False,
+                    "plot_with_lineweights": True,
+                    "plot_with_plot_styles": False,
+                    "scale_lineweights": False,
+                    "use_standard_scale": True,
+                    "plot_style_sheet": "",
+                    "style_sheet": "",
+                    "window_lower_left": [0.0, 0.0, 0.0],
+                    "window_upper_right": [10.0, 10.0, 0.0],
+                }
+        raise ValidationError(f"Layout not found: {layout_name}")
+
+    def get_plot_capabilities(self) -> dict:
+        return {
+            "devices": ["DWG To PDF.pc3", "ZWCAD PDF.pc3"],
+            "default_device": "DWG To PDF.pc3",
+            "paper_sizes": ["A0", "A1", "A2", "A3", "A4"],
+            "supported_extensions": ["pdf", "dwf", "dwfx", "dxf", "png", "jpg", "jpeg"],
+            "note": "Fake adapter returns a fixed capability list.",
+        }
+
+    def preview_plot_scope(self, request: PlotScopeRequest) -> dict:
+        scope_type = request.scope_type or "layout"
+        if scope_type == "window":
+            mn = request.window_lower_left or [0.0, 0.0, 0.0]
+            mx = request.window_upper_right or [10.0, 10.0, 0.0]
+            bounds = {"min": mn, "max": mx}
+        elif scope_type == "extents":
+            bounds = self.get_drawing_extents()
+        elif scope_type == "display":
+            bounds = self.get_current_view().get("bounds", {"min": [0, 0, 0], "max": [10, 10, 0]})
+        else:
+            bounds = {"min": [0.0, 0.0, 0.0], "max": [420.0, 297.0, 0.0]}
+        return {
+            "layout": request.layout_name or self.document.get("active_layout", "Model"),
+            "scope_type": scope_type,
+            "bounds": bounds,
+            "drawing_extents": self.get_drawing_extents(),
+            "clipping_risk": False,
+            "layout_settings": self.get_layout_plot_settings(request.layout_name),
+        }
+
+    def get_current_view(self) -> dict:
+        return {"type": "viewport", "center": [50.0, 50.0, 0.0], "height": 100.0, "width": 100.0, "bounds": {"min": [0, 0, 0], "max": [100, 100, 0]}, "twist_angle": 0.0}
+
+    def get_drawing_extents(self) -> dict:
+        bounds = [self._fake_bounds(e) for e in self.entities.values()]
+        if not bounds:
+            return {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}
+        min_vals = [min(b["min"][i] for b in bounds) for i in range(3)]
+        max_vals = [max(b["max"][i] for b in bounds) for i in range(3)]
+        return {"min": min_vals, "max": max_vals}
+
     def activate_layout(self, name: str) -> dict:
         if name not in {item["name"] for item in self.layouts}:
             raise ValidationError(f"Layout not found: {name}")
@@ -278,19 +372,86 @@ class FakeCadAdapter(CadAdapter):
         self.document["active_layout"] = name
         return {"active_layout": name}
 
-    def plot_layouts(self, layout_names: list[str], output_dir: str, plot_configuration: str | None, extension: str) -> list[dict]:
+    def plot_layouts(
+        self,
+        layout_names: list[str],
+        output_dir: str,
+        plot_configuration: str | None,
+        extension: str,
+        scope_type: str | None = None,
+        window_lower_left: list[float] | None = None,
+        window_upper_right: list[float] | None = None,
+        selected_handles: list[str] | None = None,
+        center_plot: bool | None = None,
+        fit_to_paper: bool | None = None,
+        custom_scale: float | None = None,
+        override_policy: str = "temporary",
+    ) -> list[dict]:
         return [
             {
                 "success": True,
                 "layout": name,
                 "file_path": str(Path(output_dir) / f"sample-{name}.{extension}"),
                 "plot_configuration": plot_configuration or "DWG To PDF.pc3",
+                "scope_applied": scope_type is not None,
             }
             for name in layout_names
         ]
 
     def export_drawing(self, base_file_path: str, extension: str) -> dict:
         return {"success": True, "base_file_path": base_file_path, "extension": extension.upper()}
+
+    def verify_export_files(
+        self,
+        file_paths: list[str],
+        layout_names: list[str] | None = None,
+        min_size_bytes: int = 1024,
+        expected_plot_range: dict[str, list[float]] | None = None,
+    ) -> dict:
+        results = []
+        for raw_path in file_paths:
+            path = Path(raw_path)
+            item = {
+                "path": str(path),
+                "exists": path.exists(),
+                "size_bytes": path.stat().st_size if path.exists() else 0,
+                "extension": path.suffix.lower(),
+                "layout_check": None,
+                "size_check": None,
+                "range_check": None,
+                "signature_ok": False,
+                "detected_format": None,
+            }
+            if item["exists"]:
+                item["signature_ok"] = True
+                item["detected_format"] = path.suffix.upper().lstrip(".") or "unknown"
+                item["size_check"] = item["size_bytes"] >= min_size_bytes
+                if layout_names is not None:
+                    item["layout_check"] = any(layout in path.stem for layout in layout_names)
+                if expected_plot_range is not None:
+                    area = 0.0
+                    mn = expected_plot_range.get("min", [0, 0, 0])
+                    mx = expected_plot_range.get("max", [0, 0, 0])
+                    if len(mn) >= 2 and len(mx) >= 2:
+                        area = max(0.0, (mx[0] - mn[0]) * (mx[1] - mn[1]))
+                    item["range_check"] = area > 0.0
+            else:
+                item["error"] = "file not found"
+                item["size_check"] = False
+                if layout_names is not None:
+                    item["layout_check"] = False
+                item["range_check"] = False
+            results.append(item)
+        existing = [r for r in results if r["exists"]]
+        verified = [r for r in results if r.get("signature_ok") and r.get("size_check") and r.get("layout_check") is not False and r.get("range_check") is not False]
+        return {
+            "total": len(results),
+            "existing": len(existing),
+            "verified": len(verified),
+            "missing": [r["path"] for r in results if not r["exists"]],
+            "failed": [r["path"] for r in results if r["exists"] and r not in verified],
+            "results": results,
+        }
 
     def list_block_definitions(self, detail: bool) -> list[dict]:
         return copy.deepcopy(self.block_definitions)

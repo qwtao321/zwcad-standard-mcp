@@ -3,7 +3,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Iterable
 
-from zwcad_standard_mcp.models import EntityCreateSpec, EntityQuerySpec, LayerSpec
+from zwcad_standard_mcp.models import (
+    EntityCreateSpec,
+    EntityQuerySpec,
+    LayerSpec,
+    PlotScopeRequest,
+)
 
 
 class CadAdapter(ABC):
@@ -73,6 +78,18 @@ class CadAdapter(ABC):
     def get_layout_plot_settings(self, layout_name: str | None) -> dict: ...
 
     @abstractmethod
+    def get_plot_capabilities(self) -> dict: ...
+
+    @abstractmethod
+    def preview_plot_scope(self, request: PlotScopeRequest) -> dict: ...
+
+    @abstractmethod
+    def get_current_view(self) -> dict: ...
+
+    @abstractmethod
+    def get_drawing_extents(self) -> dict: ...
+
+    @abstractmethod
     def activate_layout(self, name: str) -> dict: ...
 
     @abstractmethod
@@ -82,13 +99,27 @@ class CadAdapter(ABC):
         output_dir: str,
         plot_configuration: str | None,
         extension: str,
+        scope_type: str | None = None,
+        window_lower_left: list[float] | None = None,
+        window_upper_right: list[float] | None = None,
+        selected_handles: list[str] | None = None,
+        center_plot: bool | None = None,
+        fit_to_paper: bool | None = None,
+        custom_scale: float | None = None,
+        override_policy: str = "temporary",
     ) -> list[dict]: ...
 
     @abstractmethod
     def export_drawing(self, base_file_path: str, extension: str) -> dict: ...
 
     @abstractmethod
-    def verify_export_files(self, file_paths: list[str]) -> dict: ...
+    def verify_export_files(
+        self,
+        file_paths: list[str],
+        layout_names: list[str] | None = None,
+        min_size_bytes: int = 1024,
+        expected_plot_range: dict[str, list[float]] | None = None,
+    ) -> dict: ...
 
     @abstractmethod
     def list_block_definitions(self, detail: bool) -> list[dict]: ...

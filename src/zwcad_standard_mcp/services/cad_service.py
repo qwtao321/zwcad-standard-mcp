@@ -21,6 +21,7 @@ from zwcad_standard_mcp.models import (
     EntityPropertyPatch,
     EntityQuerySpec,
     LayerSpec,
+    PlotScopeRequest,
     TransformRequest,
 )
 from zwcad_standard_mcp.permissions.policy import PermissionLevel
@@ -69,7 +70,12 @@ def _execute_batch_job(
     gates and blocking UI prompts inside the background thread.
     """
     from zwcad_standard_mcp.adapters.com import ComCadAdapter
+    import pythoncom
 
+    # Each background worker owns a separate COM apartment.  Without this,
+    # the first COM call can fail before the job state is updated, leaving a
+    # batch job indefinitely reported as running at 0%.
+    pythoncom.CoInitialize()
     adapter = ComCadAdapter(
         prog_id=settings.prog_id if hasattr(settings, "prog_id") else "ZWCAD.Application",
         auto_start=getattr(settings, "auto_start_cad", False),
@@ -307,6 +313,18 @@ class CadService:
             },
         }
 
+    def get_plot_capabilities(self) -> dict:
+        return {"success": True, "data": self.adapter.get_plot_capabilities()}
+
+    def preview_plot_scope(self, request: PlotScopeRequest) -> dict:
+        return {"success": True, "data": self.adapter.preview_plot_scope(request)}
+
+    def get_current_view(self) -> dict:
+        return {"success": True, "data": self.adapter.get_current_view()}
+
+    def get_drawing_extents(self) -> dict:
+        return {"success": True, "data": self.adapter.get_drawing_extents()}
+
     def save_document(self, file_path: str | None, confirm: bool) -> dict:
         rejection = require_permission(PermissionLevel.SAVE, confirm=confirm, file_path=file_path)
         if rejection:
@@ -363,10 +381,28 @@ class CadService:
     def get_selected_entities(self, limit: int = 200) -> dict:
         safe_limit = min(max(1, limit), self.settings.max_query_results)
         entities = self.adapter.get_selected_entities(safe_limit)
+        handles = [item["handle"] for item in entities if item.get("handle")]
+        spaces = {item.get("space", "unknown") for item in entities}
+        bounds = [item["bounding_box"] for item in entities if item.get("bounding_box")]
+        merged = None
+        if bounds:
+            min_vals = [float("inf"), float("inf"), float("inf")]
+            max_vals = [float("-inf"), float("-inf"), float("-inf")]
+            for box in bounds:
+                mn = box.get("min", [0, 0, 0])
+                mx = box.get("max", [0, 0, 0])
+                for i in range(3):
+                    min_vals[i] = min(min_vals[i], float(mn[i]) if i < len(mn) else 0.0)
+                    max_vals[i] = max(max_vals[i], float(mx[i]) if i < len(mx) else 0.0)
+            merged = {"min": min_vals, "max": max_vals}
         return {
             "success": True,
             "count": len(entities),
             "truncated": len(entities) >= safe_limit,
+            "empty": len(entities) == 0,
+            "space": list(spaces)[0] if len(spaces) == 1 else ("mixed" if spaces else "unknown"),
+            "handles": handles,
+            "merged_bounding_box": merged,
             "data": entities,
         }
 
@@ -518,6 +554,14 @@ class CadService:
         output_dir: str,
         plot_configuration: str | None,
         extension: str,
+        scope_type: str | None = None,
+        window_lower_left: list[float] | None = None,
+        window_upper_right: list[float] | None = None,
+        selected_handles: list[str] | None = None,
+        center_plot: bool | None = None,
+        fit_to_paper: bool | None = None,
+        custom_scale: float | None = None,
+        override_policy: str = "temporary",
         dry_run: bool = True,
         confirm: bool = False,
     ) -> dict:
@@ -532,7 +576,8 @@ class CadService:
             planned = [
                 {
                     "layout": name,
-                    "file_path": str(Path(output_dir) / f"{stem}-{name}.{extension.lstrip('.')}")
+                    "file_path": str(Path(output_dir) / f"{stem}-{name}.{extension.lstrip('.')}"),
+                    "scope_type": scope_type,
                 }
                 for name in layout_names
             ]
@@ -542,7 +587,18 @@ class CadService:
             return rejection
         self._ensure_write()
         results = self.adapter.plot_layouts(
-            layout_names, output_dir, plot_configuration, extension.lstrip(".")
+            layout_names,
+            output_dir,
+            plot_configuration,
+            extension.lstrip("."),
+            scope_type=scope_type,
+            window_lower_left=window_lower_left,
+            window_upper_right=window_upper_right,
+            selected_handles=selected_handles,
+            center_plot=center_plot,
+            fit_to_paper=fit_to_paper,
+            custom_scale=custom_scale,
+            override_policy=override_policy,
         )
         return {"success": True, "dry_run": False, **self._summary(results)}
 
@@ -560,10 +616,24 @@ class CadService:
         self._ensure_write()
         return {"success": True, "dry_run": False, "data": self.adapter.export_drawing(base_file_path, extension)}
 
-    def verify_export_files(self, file_paths: list[str]) -> dict:
+    def verify_export_files(
+        self,
+        file_paths: list[str],
+        layout_names: list[str] | None = None,
+        min_size_bytes: int = 1024,
+        expected_plot_range: dict[str, list[float]] | None = None,
+    ) -> dict:
         if not file_paths:
             raise ValidationError("file_paths cannot be empty.")
-        return {"success": True, "data": self.adapter.verify_export_files(file_paths)}
+        return {
+            "success": True,
+            "data": self.adapter.verify_export_files(
+                file_paths,
+                layout_names=layout_names,
+                min_size_bytes=min_size_bytes,
+                expected_plot_range=expected_plot_range,
+            ),
+        }
 
     def list_block_definitions(self, detail: bool = False) -> dict:
         blocks = self.adapter.list_block_definitions(detail)

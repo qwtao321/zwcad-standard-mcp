@@ -11,7 +11,7 @@ from .common import invoke
 def register_entity_tools(mcp: Any, service: CadService) -> None:
     @mcp.tool()
     def get_selected_entities(limit: int = 200) -> dict:
-        """读取用户在 ZWCAD 中预先选中的实体，返回句柄、类型、图层和摘要。"""
+        """读取用户在 ZWCAD 中预先选中的实体，返回实体列表、选中句柄、合并包围盒、所在空间和是否为空选择。"""
         return invoke(service.get_selected_entities, limit)
 
     @mcp.tool()

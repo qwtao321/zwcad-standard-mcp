@@ -15,11 +15,11 @@
 | 外部导入图纸全部在 0 层，颜色和线型不随层 | `normalize_selected_entities`、`ensure_layers`、`update_entity_properties` |
 | 需要批量读取、修改或变换一组对象 | `get_selected_entities`、`get_entity_details`、`transform_entities` |
 | 重复绘制简单几何、文字和常用标注 | `create_entities_batch` |
-| 多个布局逐个切换和出 PDF，或整个文件夹批量出图 | `list_layouts`、`plot_layouts`、`create_batch_job`、`scan_cad_folder` |
+| 多个布局逐个切换和出 PDF，或先预览打印范围与设备能力 | `list_layouts`、`plot_layouts`、`preview_plot_scope`、`get_plot_capabilities`、`create_batch_job`、`scan_cad_folder` |
 | 标准版标题栏是属性块，需要批量检查和填写 | `list_block_references`、`get_block_attributes`、`update_block_attributes` |
 | 操作风险高，担心误改或误删 | 写工具默认 `dry_run=true`、每次调用授权（`confirm`）、删除/保存二次确认、Undo Mark |
 
-## 工具清单（33 个）
+## 工具清单（37 个）
 
 ### 系统诊断
 
@@ -49,20 +49,28 @@
 - `transform_entities`
 - `delete_entities`
 
+> `get_selected_entities` 同时返回选中句柄列表、合并包围盒、所在空间（model/paper）以及是否为空选择。
+
 ### 基础绘图
 
 - `create_entities_batch`
 
 支持：直线、圆、圆弧、轻量多段线、单行文字、多行文字、图块、对齐/旋转/半径/直径标注。
 
-### 布局与出图
+### 布局、出图与范围
 
 - `list_layouts`
 - `activate_layout`
 - `get_layout_plot_settings`
+- `get_plot_capabilities`
+- `preview_plot_scope`
+- `get_current_view`
+- `get_drawing_extents`
 - `plot_layouts`
 - `export_drawing`
 - `verify_export_files`
+
+支持：读取打印设备/纸张/样式、预览打印区域、按显示/图形范围/窗口/布局等多种范围出图、校验产物完整性与范围合理性。
 
 ### 图块
 
